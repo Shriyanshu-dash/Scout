@@ -11,19 +11,36 @@ Features:
 """
 
 import requests
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 import logging
 import re
 
 from app.scrapers.stealth import random_user_agent, get_requests_proxies
 from app.scrapers.utils import extract_email, parse_abbreviated_number
+from app.crawlers.crawl4ai_adapter import crawl_url
+from app.scrapers.youtube_crawl4ai import extract_profile as extract_profile_from_html
 
 logger = logging.getLogger(__name__)
 
 
+def _crawl_with_crawl4ai(url: str) -> Optional[Dict[str, Any]]:
+    """
+    Synchronous bridge for Crawl4AI's async crawl_url.
+    """
+    try:
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        crawl_result = loop.run_until_complete(crawl_url(url))
+        return crawl_result
+    except Exception as e:
+        logger.error(f"Crawl4AI crawl error: {e}")
+        return None
+
+
 def scrape_channel(channel_identifier: str) -> Optional[Dict]:
     """
-    Fetch YouTube channel data.
+    Fetch YouTube channel data using Crawl4AI as primary and requests as fallback.
 
     Args:
         channel_identifier: Can be @handle, channel ID, or custom URL name
@@ -35,17 +52,31 @@ def scrape_channel(channel_identifier: str) -> Optional[Dict]:
     else:
         url = f'https://www.youtube.com/@{channel_identifier}'
 
-    headers = {
-        'User-Agent': random_user_agent(),
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept': 'text/html,application/xhtml+xml',
-    }
-    cookies = {
-        'CONSENT': 'PENDING+999',
-    }
+    # Try Crawl4AI first
+    crawl_result = _crawl_with_crawl4ai(url)
+    if crawl_result and crawl_result.get("success") and crawl_result.get("raw_html"):
+        html = crawl_result.get("raw_html")
+        try:
+            profile = extract_profile_from_html(html, url)
+            # Extract email from the extracted bio if available
+            email = profile.get("email", "")
+            # Merge with any existing email from the original extraction logic
+            if not email:
+                profile["email"] = _extract_email_from_description(profile.get("bio", ""))
+            return profile
+        except Exception as e:
+            logger.error(f"Crawl4AI extraction failed for {channel_identifier}: {e}")
+            return None
 
+    # Fallback to requests-based scraper if Crawl4AI fails
     try:
-        r = requests.get(url, headers=headers, cookies=cookies, timeout=20, proxies=get_requests_proxies())
+        r = requests.get(url, headers={
+            'User-Agent': random_user_agent(),
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept': 'text/html,application/xhtml+xml',
+        }, cookies={
+            'CONSENT': 'PENDING+999',
+        }, timeout=20, proxies=get_requests_proxies())
 
         if r.status_code == 404:
             logger.error(f"YouTube channel {channel_identifier} not found")
@@ -72,6 +103,13 @@ def scrape_channel(channel_identifier: str) -> Optional[Dict]:
     except requests.exceptions.RequestException as e:
         logger.error(f"Error fetching YouTube channel {channel_identifier}: {e}")
         return None
+
+
+def _extract_email_from_description(description: str) -> str:
+    """
+    Extract email from description text using the existing email extraction logic.
+    """
+    return extract_email(description)
 
 
 def _extract_channel_data(html: str, identifier: str) -> Optional[Dict]:

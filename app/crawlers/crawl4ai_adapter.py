@@ -117,6 +117,7 @@ async def crawl_url(url: str) -> dict[str, Any]:
             "content": markdown,
             "markdown": markdown,
             "cleaned_html": crawl_result.cleaned_html,
+            "raw_html": crawl_result.html,
             "metadata": crawl_result.metadata,
             "response_headers": crawl_result.response_headers,
             "error": crawl_result.error_message if not crawl_result.success else None,
