@@ -213,6 +213,17 @@ def extract_header_stats(soup: BeautifulSoup) -> tuple[int, int]:
         re.IGNORECASE,
     )
 
+    # Direct requests responses can keep the video statistic inside
+    # embedded structured HTML/JSON rather than normal visible text.
+    if not video_match:
+        embedded_text = str(soup)
+
+        video_match = re.search(
+            r"([\d,.]+)\s*(K|M|B)?\s+videos",
+            embedded_text,
+            re.IGNORECASE,
+        )
+
     video_count = (
         parse_count(video_match.group(0))
         if video_match
@@ -318,7 +329,13 @@ def extract_profile(html: str, url: str) -> dict:
 
     channel_id = extract_channel_id(soup)
 
-    follower_count, video_count = extract_header_stats(soup)
+    # JSON-LD FollowAction is the primary subscriber source.
+    # Fall back to the modern header only when JSON-LD has no count.
+    follower_count = json_ld.get("follower_count", 0)
+    header_follower_count, video_count = extract_header_stats(soup)
+
+    if not follower_count:
+        follower_count = header_follower_count
 
     same_as = json_ld.get("same_as", [])
 
