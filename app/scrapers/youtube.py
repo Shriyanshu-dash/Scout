@@ -150,6 +150,48 @@ def scrape_channel(channel_identifier: str) -> Optional[Dict]:
             logger.error(f"YouTube error {r.status_code} for {channel_identifier}")
             return None
 
+        # Prefer the same structured extractor used by Crawl4AI.
+        # Direct requests responses contain modern YouTube JSON-LD data,
+        # so this keeps both acquisition paths on the same extraction logic.
+        try:
+            structured_result = extract_profile_from_html(r.text, url)
+
+            if (
+                structured_result
+                and structured_result.get("username")
+                and structured_result.get("full_name")
+                and structured_result.get("follower_count", 0) > 0
+                and structured_result.get("channel_id")
+                and structured_result.get("profile_url")
+                and structured_result.get("platform") == "youtube"
+            ):
+                email_match = re.search(
+                    r'"businessEmailLabel":\{"content":"([^"]+)"',
+                    r.text,
+                )
+
+                if email_match:
+                    structured_result["email"] = email_match.group(1)
+                elif not structured_result.get("email"):
+                    structured_result["email"] = _extract_email_from_description(
+                        structured_result.get("bio", "")
+                    )
+
+                logger.info(
+                    "Requests YouTube structured extraction succeeded for %s",
+                    channel_identifier,
+                )
+                return structured_result
+
+        except Exception as exc:
+            logger.warning(
+                "Structured requests extraction failed for %s: %s; "
+                "trying legacy extractor.",
+                channel_identifier,
+                exc,
+            )
+
+        # Preserve the original regex extractor as a secondary fallback.
         result = _extract_channel_data(r.text, channel_identifier)
         if result:
             return result
