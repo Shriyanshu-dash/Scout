@@ -6,4 +6,7 @@ __all__ = [
     "Crawl4AIError",
     "crawl_url",
     "health_check",
+    "fetch",
+    "fetch_async",
 ]
+from .gateway import fetch, fetch_async
