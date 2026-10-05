@@ -23,6 +23,7 @@ import json
 
 from app.scrapers.stealth import random_user_agent
 from app.scrapers.utils import extract_email as _shared_extract_email
+from app.crawlers import fetch_page
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,27 @@ def _scrape_profile(username: str, platform: str) -> Optional[Dict]:
 
     url = PLATFORMS[platform].format(username=username)
 
+    # Linktree: Scrapling + Scout gateway is the primary HTML path.
+    # The existing requests implementation below remains the fallback.
+    if platform == 'linktree':
+        try:
+            page = fetch_page(url, backend='auto')
+            profile = _parse_linktree_selector(page.selector, username)
+            if profile:
+                return profile
+            logger.debug(
+                "Scrapling Linktree extraction returned no profile for %s; "
+                "using requests fallback.",
+                username,
+            )
+        except Exception as exc:
+            logger.debug(
+                "Scrapling Linktree path failed for %s: %s; "
+                "using requests fallback.",
+                username,
+                exc,
+            )
+
     headers = {
         'User-Agent': random_user_agent(),
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -112,6 +134,48 @@ def _scrape_profile(username: str, platform: str) -> Optional[Dict]:
         logger.error(f"Error fetching {platform} profile {username}: {e}")
         return None
 
+
+
+def _parse_linktree_selector(selector, username: str) -> Optional[Dict]:
+    """Parse a Linktree page using a Scrapling Selector."""
+    script_text = selector.css("script#__NEXT_DATA__::text").get()
+
+    if not script_text:
+        return None
+
+    try:
+        data = json.loads(script_text)
+        account = data.get('props', {}).get('pageProps', {}).get('account', {})
+
+        if not account:
+            return None
+
+        links = []
+        for link in account.get('links', []):
+            if link.get('url'):
+                links.append({
+                    'title': link.get('title', ''),
+                    'url': link.get('url', ''),
+                })
+
+        bio = account.get('description', '')
+
+        return {
+            'username': username,
+            'full_name': account.get('pageTitle', ''),
+            'bio': bio,
+            'email': _extract_email_from_links(links) or _extract_email(bio),
+            'follower_count': 0,
+            'website': _extract_website(links),
+            'links': links,
+            'link_count': len(links),
+            'socials': _extract_socials(links),
+            'platform': 'linktree',
+            'profile_url': f'https://linktr.ee/{username}',
+        }
+
+    except json.JSONDecodeError:
+        return None
 
 def _parse_linktree(html: str, username: str) -> Optional[Dict]:
     """Parse Linktree page."""

@@ -21,10 +21,6 @@ from typing import Any, Literal
 
 import requests
 
-from app.scrapers.stealth import (
-    get_requests_proxies,
-    random_user_agent,
-)
 from .crawl4ai_adapter import crawl_url
 
 logger = logging.getLogger(__name__)
@@ -37,6 +33,11 @@ def _timestamp() -> str:
 
 
 def _http_fetch(url: str) -> dict[str, Any]:
+    # Lazy import avoids app.scrapers <-> app.crawlers circular imports.
+    from app.scrapers.stealth import (
+        get_requests_proxies,
+        random_user_agent,
+    )
     """Fetch a URL with Scout's existing HTTP/stealth infrastructure."""
     headers = {
         "User-Agent": random_user_agent(),
