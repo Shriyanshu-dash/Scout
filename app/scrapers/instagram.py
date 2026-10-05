@@ -15,9 +15,11 @@ import requests
 from typing import Dict, Optional
 import logging
 import re
+import json
 
 from app.scrapers.stealth import get_requests_proxies
 from app.scrapers.utils import extract_email, extract_phone, parse_abbreviated_number
+from app.crawlers import fetch_page
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +45,7 @@ def _is_page_not_found(html: str) -> bool:
     return any(signal in snippet for signal in not_found_signals)
 
 
-def scrape_profile_no_login(username: str, max_retries: int = 3) -> Optional[Dict]:
+def _scrape_profile_http(username: str, max_retries: int = 3) -> Optional[Dict]:
     """Scrape Instagram profile using mobile web HTML parsing (no API)."""
     import random
     import time
@@ -114,6 +116,144 @@ def scrape_profile_no_login(username: str, max_retries: int = 3) -> Optional[Dic
             return None
 
     return None
+
+
+def scrape_profile_no_login(username: str, max_retries: int = 3) -> Optional[Dict]:
+    """Scrape an Instagram public profile using Scout acquisition + Scrapling.
+
+    Scout handles acquisition through the central gateway. Scrapling parses
+    Instagram's structured profile payload. The legacy requests/regex parser
+    remains as a last-resort fallback for older or unusual responses.
+    """
+    url = f'https://www.instagram.com/{username}/'
+
+    try:
+        page = fetch_page(url, backend='auto')
+        html = page.raw_html or ''
+        final_url = page.url or url
+
+        if page.status_code == 404 or _is_page_not_found(html):
+            return None
+
+        if (
+            '/accounts/login' in final_url
+            or (
+                'login' in html[:5000].lower()
+                and 'password' in html[:5000].lower()
+            )
+        ):
+            return None
+
+        from scrapling.parser import Selector
+
+        selector = Selector(content=html, url=final_url)
+
+        profile = _extract_profile_from_selector(selector, username)
+
+        if profile:
+            return profile
+
+        # If Instagram exposed its structured profile payload but the
+        # requested identity was not found, do not let broad legacy regexes
+        # accidentally return another account.
+        if _has_structured_instagram_profile_payload(selector):
+            return None
+
+    except Exception as exc:
+        logger.debug(
+            "Scrapling primary Instagram path failed for @%s: %s",
+            username,
+            exc,
+        )
+
+    return _scrape_profile_http(username, max_retries=max_retries)
+
+
+def _extract_profile_from_selector(
+    selector,
+    username: str,
+) -> Optional[Dict]:
+    """Extract one exact Instagram profile from structured page JSON."""
+    for script in selector.css("script"):
+        text = script.css("::text").get() or ''
+
+        if 'xig_user_by_username' not in text:
+            continue
+
+        try:
+            payload = json.loads(text)
+        except (TypeError, json.JSONDecodeError):
+            continue
+
+        profile = _find_instagram_profile(payload, username)
+
+        if not profile:
+            continue
+
+        bio = profile.get('biography') or ''
+        website = ''
+
+        for link in profile.get('bio_links') or []:
+            if isinstance(link, dict) and link.get('url'):
+                website = link['url']
+                break
+
+        return {
+            'username': profile.get('username', username),
+            'full_name': profile.get('full_name', ''),
+            'bio': bio,
+            'follower_count': profile.get('follower_count', 0),
+            'following_count': profile.get('following_count', 0),
+            'post_count': profile.get('all_media_count') or 0,
+            'is_verified': bool(profile.get('is_verified', False)),
+            'is_private': bool(profile.get('is_private', False)),
+            'is_business': bool(profile.get('is_business_account', False)),
+            'website': website,
+            'email': _extract_email(bio),
+            'phone': _extract_phone(bio),
+            'platform': 'instagram',
+            'profile_url': f'https://www.instagram.com/{profile.get("username", username)}/',
+        }
+
+    return None
+
+
+def _find_instagram_profile(node, username: str) -> Optional[Dict]:
+    """Recursively find an exact xig_user_by_username profile."""
+    if isinstance(node, dict):
+        candidate = node.get('xig_user_by_username')
+
+        if (
+            isinstance(candidate, dict)
+            and isinstance(candidate.get('username'), str)
+            and candidate['username'].lower() == username.lower()
+            and 'follower_count' in candidate
+        ):
+            return candidate
+
+        for value in node.values():
+            result = _find_instagram_profile(value, username)
+            if result:
+                return result
+
+    elif isinstance(node, list):
+        for value in node:
+            result = _find_instagram_profile(value, username)
+            if result:
+                return result
+
+    return None
+
+
+def _has_structured_instagram_profile_payload(selector) -> bool:
+    """Check whether Instagram exposed its structured profile payload."""
+    for script in selector.css("script"):
+        text = script.css("::text").get() or ''
+
+        if 'xig_user_by_username' in text:
+            return True
+
+    return False
 
 
 def _extract_profile_from_html(html: str, username: str) -> Optional[Dict]:
