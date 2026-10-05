@@ -4,7 +4,6 @@ Test script for the production YouTube scraper using Crawl4AI.
 This script tests the integrated production function with real YouTube channels.
 """
 
-import asyncio
 import json
 from typing import Dict, Optional
 
@@ -12,7 +11,7 @@ from app.scrapers.youtube import scrape_channel
 from app.crawlers.crawl4ai_adapter import crawl_url
 
 
-async def test_production_integration():
+def test_production_integration():
     """Test the production integration with real YouTube channels."""
     test_channels = [
         "GoogleDevelopers",
@@ -28,10 +27,8 @@ async def test_production_integration():
 
     for channel_handle in test_channels:
         print(f"\n=== Testing {channel_handle} ===")
-        channel_url = f"https://www.youtube.com/@{channel_handle}"
-
-        # Test the production scrape_channel function
-        profile = await scrape_channel(channel_url)
+        # Test the synchronous production scrape_channel function.
+        profile = scrape_channel(channel_handle)
 
         if not profile:
             print(f"❌ Failed to fetch profile for {channel_handle}")
@@ -60,4 +57,4 @@ async def test_production_integration():
 
 
 if __name__ == "__main__":
-    asyncio.run(test_production_integration())
+    test_production_integration()
