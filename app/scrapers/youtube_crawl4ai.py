@@ -11,7 +11,7 @@ import re
 from typing import Dict, List, Optional, Union
 from urllib.parse import parse_qs, unquote, urlparse
 
-from bs4 import BeautifulSoup
+from scrapling.parser import Selector
 from app.scrapers.utils import extract_email, parse_abbreviated_number
 
 
@@ -56,15 +56,12 @@ def parse_count(text: str | None) -> int:
     return int(number * multiplier)
 
 
-def extract_json_ld(soup: BeautifulSoup) -> dict:
+def extract_json_ld(selector) -> dict:
     """
     Extract YouTube channel metadata from Schema.org JSON-LD.
     """
-    for script in soup.find_all(
-        "script",
-        attrs={"type": "application/ld+json"},
-    ):
-        raw = script.string or script.get_text()
+    for script in selector.css('script[type="application/ld+json"]'):
+        raw = script.css("::text").get() or ""
 
         if not raw.strip():
             continue
@@ -92,7 +89,6 @@ def extract_json_ld(soup: BeautifulSoup) -> dict:
                 same_as = [same_as]
 
             follower_count = 0
-
             interaction_statistics = main_entity.get(
                 "interactionStatistic",
                 [],
@@ -119,12 +115,8 @@ def extract_json_ld(soup: BeautifulSoup) -> dict:
                 if str(interaction_type).lower() != "followaction":
                     continue
 
-                count_value = statistic.get(
-                    "userInteractionCount",
-                )
-
                 follower_count = parse_count(
-                    str(count_value)
+                    str(statistic.get("userInteractionCount"))
                 )
 
                 if follower_count:
@@ -151,16 +143,13 @@ def extract_json_ld(soup: BeautifulSoup) -> dict:
 
     return {}
 
-
-def extract_channel_id(soup: BeautifulSoup) -> str:
+def extract_channel_id(selector) -> str:
     """
     Extract the canonical YouTube channel ID.
     Prefer the canonical URL, then Schema.org identifier.
     """
-    canonical = soup.find("link", rel="canonical")
-
-    if canonical:
-        href = canonical.get("href", "")
+    for canonical in selector.css('link[rel="canonical"]'):
+        href = canonical.attrib.get("href", "")
 
         match = re.search(
             r"/channel/(UC[A-Za-z0-9_-]{22})",
@@ -170,40 +159,31 @@ def extract_channel_id(soup: BeautifulSoup) -> str:
         if match:
             return match.group(1)
 
-    identifier = soup.find(
-        "meta",
-        attrs={
-            "itemprop": "identifier",
-        },
-    )
-
-    if identifier:
-        value = identifier.get("content", "")
+    for identifier in selector.css('meta[itemprop="identifier"]'):
+        value = identifier.attrib.get("content", "")
 
         if re.fullmatch(r"UC[A-Za-z0-9_-]{22}", value):
             return value
 
     return ""
 
-
-def extract_header_stats(soup: BeautifulSoup) -> tuple[int, int]:
+def extract_header_stats(selector) -> tuple[int, int]:
     """
     Extract subscriber and video counts from the modern YouTube header.
     """
-    page_text = soup.get_text(" ", strip=True)
-
-    subscriber_element = soup.find(
-        attrs={"aria-label": re.compile(
-            r"subscribers",
-            re.IGNORECASE,
-        )}
+    page_text = selector.get_all_text(
+        separator=" ",
+        strip=True,
     )
 
-    subscriber_label = (
-        subscriber_element.get("aria-label", "")
-        if subscriber_element
-        else ""
-    )
+    subscriber_label = ""
+
+    for node in selector.css("[aria-label]"):
+        label = node.attrib.get("aria-label", "")
+
+        if "subscriber" in label.lower():
+            subscriber_label = label
+            break
 
     follower_count = parse_count(subscriber_label)
 
@@ -213,10 +193,8 @@ def extract_header_stats(soup: BeautifulSoup) -> tuple[int, int]:
         re.IGNORECASE,
     )
 
-    # Direct requests responses can keep the video statistic inside
-    # embedded structured HTML/JSON rather than normal visible text.
     if not video_match:
-        embedded_text = str(soup)
+        embedded_text = str(selector)
 
         video_match = re.search(
             r"([\d,.]+)\s*(K|M|B)?\s+videos",
@@ -231,7 +209,6 @@ def extract_header_stats(soup: BeautifulSoup) -> tuple[int, int]:
     )
 
     return follower_count, video_count
-
 
 def classify_links(links: List[str]) -> tuple[str, List[str]]:
     """
@@ -276,50 +253,54 @@ def extract_profile(html: str, url: str) -> dict:
     Returns:
         Dictionary containing extracted profile data
     """
-    soup = BeautifulSoup(html, "html.parser")
+    selector = Selector(
+        content=html,
+        url=url,
+    )
 
-    json_ld = extract_json_ld(soup)
+    json_ld = extract_json_ld(selector)
 
-    # Structured metadata is preferred for identity/description/links.
     full_name = json_ld.get("name", "")
     bio = json_ld.get("description", "")
     canonical_url = json_ld.get("url", "")
 
-    # Handle
     username = json_ld.get("alternate_name", "")
 
     if username.startswith("@"):
         username = username[1:]
 
     if not username:
+        full_text = selector.get_all_text(
+            separator=" ",
+            strip=True,
+        )
+
         handle_match = re.search(
             r"(?<!\w)@([A-Za-z0-9._-]+)",
-            soup.get_text(" ", strip=True),
+            full_text,
         )
+
         if handle_match:
             username = handle_match.group(1)
 
-    # Fallback name from modern page header
     if not full_name:
-        name_element = soup.select_one(
+        name_nodes = selector.css(
             "yt-dynamic-text-view-model h1"
         )
 
-        if name_element:
-            full_name = name_element.get_text(
+        if name_nodes:
+            full_name = name_nodes[0].get_all_text(
                 " ",
                 strip=True,
             )
 
-    # Fallback canonical URL
     if not canonical_url:
-        canonical_element = soup.find(
-            "link",
-            rel="canonical",
+        canonical_nodes = selector.css(
+            'link[rel="canonical"]'
         )
 
-        if canonical_element:
-            canonical_url = canonical_element.get(
+        if canonical_nodes:
+            canonical_url = canonical_nodes[0].attrib.get(
                 "href",
                 "",
             )
@@ -327,12 +308,12 @@ def extract_profile(html: str, url: str) -> dict:
     if not canonical_url:
         canonical_url = url
 
-    channel_id = extract_channel_id(soup)
+    channel_id = extract_channel_id(selector)
 
-    # JSON-LD FollowAction is the primary subscriber source.
-    # Fall back to the modern header only when JSON-LD has no count.
     follower_count = json_ld.get("follower_count", 0)
-    header_follower_count, video_count = extract_header_stats(soup)
+    header_follower_count, video_count = extract_header_stats(
+        selector
+    )
 
     if not follower_count:
         follower_count = header_follower_count
@@ -350,10 +331,7 @@ def extract_profile(html: str, url: str) -> dict:
 
     website, social_links = classify_links(same_as)
 
-    # Extract email from description if available
-    email = ""
-    if bio:
-        email = extract_email(bio)
+    email = extract_email(bio) if bio else ""
 
     return {
         "username": username,
@@ -369,7 +347,6 @@ def extract_profile(html: str, url: str) -> dict:
         "platform": "youtube",
         "profile_url": canonical_url,
     }
-
 
 # Helper functions for backward compatibility with existing code
 _parse_count = parse_abbreviated_number
