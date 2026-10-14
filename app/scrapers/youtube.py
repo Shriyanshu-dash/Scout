@@ -17,46 +17,41 @@ import re
 
 from app.scrapers.stealth import random_user_agent, get_requests_proxies
 from app.scrapers.utils import extract_email, parse_abbreviated_number
-from app.crawlers.crawl4ai_adapter import crawl_url
+from app.crawlers import fetch_page
 from app.scrapers.youtube_crawl4ai import extract_profile as extract_profile_from_html
 
 logger = logging.getLogger(__name__)
 
 
-def _crawl_with_crawl4ai(url: str) -> Optional[Dict[str, Any]]:
-    """
-    Synchronous bridge for Crawl4AI's async crawl_url.
-
-    The normal Scout CLI is synchronous. When called from a thread
-    without a running event loop, asyncio.run() manages the loop
-    lifecycle and cleanup for us. If this function is called while
-    another event loop is already running in the same thread, the
-    Crawl4AI path is skipped and the caller can use the requests
-    fallback instead.
-    """
+def _fetch_with_scrapling(url: str) -> Optional[Dict[str, Any]]:
+    """Acquire a YouTube page through Scout's gateway and Scrapling bridge."""
     try:
-        import asyncio
+        page = fetch_page(url, backend="auto")
 
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.run(crawl_url(url))
+        if not page.success or not page.raw_html:
+            logger.warning(
+                "Scout gateway returned no usable YouTube HTML for %s",
+                url,
+            )
+            return None
 
+        return {
+            "success": True,
+            "raw_html": page.raw_html,
+            "final_url": page.url or url,
+            "backend": page.backend,
+            "status_code": page.status_code,
+        }
+    except Exception as exc:
         logger.warning(
-            "Crawl4AI skipped for %s because an event loop is already running; "
-            "using requests fallback.",
+            "Scout gateway/Scrapling acquisition failed for %s: %s",
             url,
+            exc,
         )
         return None
-
-    except Exception as exc:
-        logger.error("Crawl4AI crawl error for %s: %s", url, exc)
-        return None
-
-
 def scrape_channel(channel_identifier: str) -> Optional[Dict]:
     """
-    Fetch YouTube channel data using Crawl4AI as primary and requests as fallback.
+    Fetch YouTube channel data through Scout's gateway/Scrapling, with requests fallback.
 
     Args:
         channel_identifier: Can be @handle, channel ID, or custom URL name
@@ -68,16 +63,16 @@ def scrape_channel(channel_identifier: str) -> Optional[Dict]:
     else:
         url = f'https://www.youtube.com/@{channel_identifier}'
 
-    # Try Crawl4AI first.
-    crawl_result = _crawl_with_crawl4ai(url)
+    # Try Scout's shared gateway and Scrapling bridge first.
+    crawl_result = _fetch_with_scrapling(url)
 
     if crawl_result and crawl_result.get("success") and crawl_result.get("raw_html"):
         html = crawl_result["raw_html"]
 
         try:
-            profile = extract_profile_from_html(html, url)
+            profile = extract_profile_from_html(html, crawl_result.get('final_url') or url)
 
-            # Only return the Crawl4AI result when it is complete enough
+            # Only return the gateway result when it is complete enough
             # for Scout. Otherwise continue into the requests fallback.
             required_fields = (
                 profile.get("username") if profile else None,
@@ -104,20 +99,20 @@ def scrape_channel(channel_identifier: str) -> Optional[Dict]:
                     profile["email"] = _extract_email_from_description(bio)
 
                 logger.info(
-                    "Crawl4AI YouTube extraction succeeded for %s",
+                    "Scout gateway/Scrapling YouTube extraction succeeded for %s",
                     channel_identifier,
                 )
                 return profile
 
             logger.warning(
-                "Crawl4AI produced an incomplete profile for %s; "
+                "Gateway/Scrapling produced an incomplete profile for %s; "
                 "using requests fallback.",
                 channel_identifier,
             )
 
         except Exception as exc:
             logger.warning(
-                "Crawl4AI extraction failed for %s: %s; "
+                "Gateway/Scrapling extraction failed for %s: %s; "
                 "using requests fallback.",
                 channel_identifier,
                 exc,
