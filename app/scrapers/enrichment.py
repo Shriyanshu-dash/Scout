@@ -10,7 +10,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import httpx
 
-from app.scrapers.stealth import random_user_agent, random_delay
+from app.scrapers.stealth import random_delay
+from app.crawlers import fetch_page
+from scrapling.parser import Selector
 
 logger = logging.getLogger(__name__)
 
@@ -161,62 +163,134 @@ class LeadEnricher:
         return True
 
     def _extract_phone_from_text(self, text: str) -> Optional[str]:
-        tel_links = re.findall(r'href=["\']tel:([+\d\s\-().]+)', text)
-        for tel in tel_links:
-            clean = re.sub(r'[^\d+]', '', tel)
+        """Extract phone numbers from HTML or plain text using Scrapling."""
+        if not text:
+            return None
+
+        try:
+            selector = Selector(content=text)
+            hrefs = [
+                node.attrib.get("href", "")
+                for node in selector.css("[href]")
+            ]
+            visible = selector.get_all_text(separator=" ", strip=True)
+        except Exception as exc:
+            logger.debug("Scrapling phone parsing failed: %s", exc)
+            hrefs = []
+            visible = re.sub(
+                r"<script[^>]*>.*?</script>", "", text, flags=re.DOTALL
+            )
+            visible = re.sub(
+                r"<style[^>]*>.*?</style>", "", visible, flags=re.DOTALL
+            )
+            visible = re.sub(r"<[^>]+>", " ", visible)
+            visible = re.sub(r"\s+", " ", visible)
+
+        tel_candidates = [
+            href[4:] for href in hrefs if href.lower().startswith("tel:")
+        ]
+        tel_candidates.extend(
+            re.findall(r'href=["\']tel:([+\d\s\-().]+)', text)
+        )
+
+        for tel in tel_candidates:
+            clean = re.sub(r"[^\d+]", "", tel)
             if 10 <= len(clean) <= 15:
                 return tel.strip()
 
-        wa_links = re.findall(r'(?:wa\.me|api\.whatsapp\.com/send\?phone=)(\d+)', text)
-        for num in wa_links:
-            if 10 <= len(num) <= 15:
-                return '+' + num
-
-        visible = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.DOTALL)
-        visible = re.sub(r'<style[^>]*>.*?</style>', '', visible, flags=re.DOTALL)
-        visible = re.sub(r'<[^>]+>', ' ', visible)
-        visible = re.sub(r'\s+', ' ', visible)
+        whatsapp_candidates = re.findall(
+            r"(?:wa\.me/|api\.whatsapp\.com/send\?phone=)(\d+)",
+            text,
+            re.IGNORECASE,
+        )
+        for number in whatsapp_candidates:
+            if 10 <= len(number) <= 15:
+                return "+" + number
 
         phone_patterns = [
-            r'\+1[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}',
-            r'\+?\d{1,3}[-.\s]\(?\d{3}\)[-.\s]?\d{3}[-.\s]?\d{4}',
-            r'\(\d{3}\)[-.\s]?\d{3}[-.\s]?\d{4}',
+            r"\+1[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}",
+            r"\+?\d{1,3}[-.\s]\(?\d{3}\)[-.\s]?\d{3}[-.\s]?\d{4}",
+            r"\(\d{3}\)[-.\s]?\d{3}[-.\s]?\d{4}",
         ]
 
         for pattern in phone_patterns:
-            phones = re.findall(pattern, visible)
-            for phone in phones:
-                clean = re.sub(r'[^\d+]', '', phone)
+            for phone in re.findall(pattern, visible):
+                clean = re.sub(r"[^\d+]", "", phone)
                 if 10 <= len(clean) <= 15:
                     return phone.strip()
 
         return None
 
     def _fetch_page(self, url: str) -> Optional[str]:
+        """Acquire website HTML through Scout's shared gateway."""
+        if not url.lower().startswith(("http://", "https://")):
+            url = "https://" + url
+
         try:
-            if not url.startswith('http'):
-                url = 'https://' + url
-            resp = httpx.get(url, timeout=10, headers={
-                'User-Agent': random_user_agent()
-            }, follow_redirects=True)
-            if resp.status_code == 200:
-                return resp.text
-        except Exception as e:
-            logger.debug(f"Error fetching {url}: {e}")
+            page = fetch_page(url, backend="auto")
+            html = page.raw_html or ""
+
+            if page.success and page.status_code == 200 and html:
+                return html
+
+            logger.debug(
+                "Scout gateway returned no usable page for %s "
+                "(backend=%s, status=%s)",
+                url,
+                page.backend,
+                page.status_code,
+            )
+        except Exception as exc:
+            logger.debug("Error fetching %s through Scout gateway: %s", url, exc)
+
         return None
 
-    def _deep_scrape_website(self, website: str) -> Dict:
-        result = {'email': None, 'phone': None, 'all_emails': []}
+    def _extract_emails_from_html(self, html: str) -> List[str]:
+        """Extract valid emails while preserving legacy raw-HTML ordering."""
+        # Keep the legacy raw-HTML match order first, since callers use
+        # the first valid result as the preferred email address.
+        candidates = re.findall(EMAIL_RE, html)
 
-        if not website.startswith('http'):
-            website = 'https://' + website
+        try:
+            selector = Selector(content=html)
+
+            visible_text = selector.get_all_text(
+                separator=" ",
+                strip=True,
+            )
+            candidates.extend(re.findall(EMAIL_RE, visible_text))
+
+            for node in selector.css("[href]"):
+                href = node.attrib.get("href", "")
+                if href.lower().startswith("mailto:"):
+                    address = href[7:].split("?", 1)[0]
+                    candidates.extend(re.findall(EMAIL_RE, address))
+        except Exception as exc:
+            logger.debug("Scrapling email parsing failed: %s", exc)
+
+        valid = []
+        seen = set()
+
+        for email in candidates:
+            if self._is_valid_email(email) and email.lower() not in seen:
+                seen.add(email.lower())
+                valid.append(email)
+
+        return valid
+
+
+    def _deep_scrape_website(self, website: str) -> Dict:
+        result = {"email": None, "phone": None, "all_emails": []}
+
+        if not website.startswith(("http://", "https://")):
+            website = "https://" + website
 
         pages_to_check = [
             website,
-            website.rstrip('/') + '/contact',
-            website.rstrip('/') + '/contact-us',
-            website.rstrip('/') + '/about',
-            website.rstrip('/') + '/about-us',
+            website.rstrip("/") + "/contact",
+            website.rstrip("/") + "/contact-us",
+            website.rstrip("/") + "/about",
+            website.rstrip("/") + "/about-us",
         ]
 
         all_emails = []
@@ -226,24 +300,23 @@ class LeadEnricher:
             if not html:
                 continue
 
-            emails = re.findall(EMAIL_RE, html)
-            valid = [e for e in emails if self._is_valid_email(e)]
+            valid = self._extract_emails_from_html(html)
             all_emails.extend(valid)
 
-            if not result['email'] and valid:
-                result['email'] = valid[0]
+            if not result["email"] and valid:
+                result["email"] = valid[0]
 
-            if not result['phone']:
+            if not result["phone"]:
                 phone = self._extract_phone_from_text(html)
                 if phone:
-                    result['phone'] = phone
+                    result["phone"] = phone
 
-            if result['email'] and result['phone']:
+            if result["email"] and result["phone"]:
                 break
 
             random_delay(0.3, 0.8)
 
-        result['all_emails'] = list(set(all_emails))
+        result["all_emails"] = list(set(all_emails))
         return result
 
     def _predict_email_from_pattern(self, full_name: str, website: str,
@@ -487,20 +560,19 @@ class LeadEnricher:
         return cleaned
 
     def _scrape_link_page(self, url: str) -> Dict[str, Optional[str]]:
-        result = {'email': None, 'phone': None}
+        result = {"email": None, "phone": None}
 
         html = self._fetch_page(url)
         if not html:
             return result
 
-        emails = re.findall(EMAIL_RE, html)
-        valid = [e for e in emails if self._is_valid_email(e)]
+        valid = self._extract_emails_from_html(html)
         if valid:
-            result['email'] = valid[0]
+            result["email"] = valid[0]
 
         phone = self._extract_phone_from_text(html)
         if phone:
-            result['phone'] = phone
+            result["phone"] = phone
 
         return result
 
