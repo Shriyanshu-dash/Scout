@@ -151,6 +151,35 @@ def scrape_profile_no_login(username: str, max_retries: int = 3) -> Optional[Dic
         profile = _extract_profile_from_selector(selector, username)
 
         if profile:
+            # Some live Instagram payloads expose all_media_count=None.
+            # Backfill only from the legacy parser for the exact same user.
+            if not profile.get("post_count"):
+                try:
+                    legacy_profile = _extract_profile_from_html(
+                        html, username
+                    )
+                    legacy_username = (
+                        legacy_profile or {}
+                    ).get("username")
+                    legacy_count = (
+                        legacy_profile or {}
+                    ).get("post_count")
+
+                    if (
+                        isinstance(legacy_username, str)
+                        and legacy_username.casefold() == username.casefold()
+                        and isinstance(legacy_count, int)
+                        and not isinstance(legacy_count, bool)
+                        and legacy_count > 0
+                    ):
+                        profile["post_count"] = legacy_count
+                except Exception as exc:
+                    logger.debug(
+                        "Unable to backfill Instagram post count for @%s: %s",
+                        username,
+                        exc,
+                    )
+
             return profile
 
         # If Instagram exposed its structured profile payload but the
