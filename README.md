@@ -12,12 +12,27 @@ Lead generation tool for appointment setters. Scrapes profiles from 8 platforms,
 
 ## Install
 
+Clone your repository and create an isolated Python environment:
+
 ```bash
-git clone https://github.com/kiryano/Scout.git
+git clone https://github.com/Shriyanshu-dash/Scout.git
 cd Scout
-pip install -r requirements.txt
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 cp .env.example .env
 ```
+
+Activate the environment whenever you open a new terminal:
+
+```bash
+cd Scout
+source .venv/bin/activate
+```
+
+On Linux, if virtual-environment creation is unavailable, install the
+Python venv package provided by your distribution first.
 
 ## Usage
 
@@ -29,6 +44,69 @@ python scout.py --help
 ```
 
 Interactive CLI for scraping profiles, enriching leads with contact info, and exporting to CSV.
+
+## Acquisition and Extraction
+
+Scout separates page acquisition from platform-specific HTML extraction.
+
+- `app/crawlers/gateway.py` provides the shared acquisition interface.
+- The `auto` backend tries Crawl4AI first and falls back to HTTP when needed.
+- The `http` backend selects the shared HTTP acquisition path.
+- The `crawl4ai` backend selects Crawl4AI without an HTTP fallback.
+- `app/crawlers/scrapling_bridge.py` passes acquired HTML to Scrapling
+  for structured extraction.
+- GitHub REST, LinkedIn authenticated access, and Twitch GraphQL remain
+  native API integrations rather than being replaced by HTML parsing.
+
+Legacy HTTP recovery paths are retained in the website scrapers where
+implemented. A successful offline parser test does not guarantee that
+a live provider will allow a request or return the same page structure.
+
+## Regression Tests
+
+Run these commands from the repository root with the virtual environment
+activated. These suites use fixtures and mocked responses for regression
+coverage; they are not a substitute for live-provider verification.
+
+```bash
+python -m experiments.test_linktree_scrapling
+python -m experiments.test_linkbio_gateway
+python -m experiments.test_pinterest_scrapling
+python -m experiments.test_instagram_scrapling
+python -m experiments.test_instagram_count_backfill
+python -m experiments.test_youtube_scrapling
+python -m experiments.test_youtube_gateway
+python -m experiments.test_enrichment_scrapling
+python -m experiments.test_native_api_scrapers
+python -m experiments.test_gateway_regression
+python -m experiments.test_csv_export
+
+python -m compileall -q app/crawlers app/scrapers scout.py
+python -m pip check
+```
+
+## CSV Exports
+
+Scout writes timestamped CSV files to its current working directory,
+using names such as `github_export_YYYYMMDD_HHMMSS.csv`.
+
+The exporter combines columns across all records, so profiles with
+different fields can be exported together. Missing fields appear as
+empty cells. Generated CSV files are excluded from Git by `.gitignore`;
+keep exports containing personal or contact data appropriately protected.
+
+## Operational Notes
+
+- LinkedIn's authenticated API path requires a valid `LINKEDIN_COOKIE`.
+  Cookie expiration can require re-authentication.
+- Public providers may return 404 responses, anti-bot pages, consent pages,
+  or changed HTML structures. Investigate the specific response before
+  changing a parser.
+- Linkr live extraction remains unverified: the tested URLs returned
+  `404 NoSuchKey`. Confirm a working profile URL before treating this as
+  a parser defect.
+- Live LinkedIn verification was not performed because no cookie was
+  configured during the acceptance checks.
 
 ## Supported Platforms
 
