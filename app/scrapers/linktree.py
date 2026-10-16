@@ -248,7 +248,31 @@ def _parse_stan_selector(selector, username: str) -> Optional[Dict]:
     name_match = re.search(r'"name"\s*:\s*"([^"]+)"', script_text)
     bio_match = re.search(r'"description"\s*:\s*"([^"]*)"', script_text)
 
-    full_name = name_match.group(1) if name_match else ""
+    # Prefer structured data, then the visible page heading, then metadata.
+    embedded_name = name_match.group(1).strip() if name_match else ""
+    heading = selector.css("h1::text").get() or ""
+
+    og_title_nodes = selector.css('meta[property="og:title"]')
+    og_title = (
+        og_title_nodes[0].attrib.get("content", "")
+        if og_title_nodes else ""
+    )
+    document_title = selector.css("title::text").get() or ""
+    metadata_name = og_title or document_title
+
+    metadata_name = re.sub(
+        r"\s*(?:\||-)\s*Stan\s*$",
+        "",
+        metadata_name,
+        flags=re.IGNORECASE,
+    ).strip()
+    metadata_name = re.sub(
+        r"\s*\(@[^)]*\)\s*$",
+        "",
+        metadata_name,
+    ).strip()
+
+    full_name = embedded_name or heading.strip() or metadata_name
     bio = bio_match.group(1) if bio_match else ""
 
     if not full_name and not links:

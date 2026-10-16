@@ -88,6 +88,33 @@ class LinkBioGatewayTests(unittest.TestCase):
                     self.assertIn(platform.title(), result["full_name"])
                     self.assertEqual(result["bio"], "Creator profile bio")
 
+    def test_stan_uses_visible_heading_when_embedded_name_is_missing(self):
+        html = """
+        <html>
+          <head>
+            <title>Abigail Peugh (@abigailpeugh) | Stan</title>
+            <meta property="og:title"
+                  content="Abigail Peugh (@abigailpeugh) | Stan">
+          </head>
+          <body>
+            <h1>Abigail Peugh</h1>
+            <a href="https://example.com">Website</a>
+          </body>
+        </html>
+        """
+        page = make_page("stan", html=html)
+
+        with (
+            patch.object(linktree, "fetch_page", return_value=page),
+            patch.object(linktree.requests, "get") as legacy,
+        ):
+            result = linktree.scrape_stan("abigailpeugh")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["full_name"], "Abigail Peugh")
+        self.assertEqual(result["platform"], "stan")
+        legacy.assert_not_called()
+
     def test_gateway_exception_preserves_http_fallback(self):
         for platform, scraper in PROVIDERS.items():
             with self.subTest(platform=platform):
