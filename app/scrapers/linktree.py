@@ -80,26 +80,37 @@ def _scrape_profile(username: str, platform: str) -> Optional[Dict]:
 
     url = PLATFORMS[platform].format(username=username)
 
-    # Linktree: Scrapling + Scout gateway is the primary HTML path.
-    # The existing requests implementation below remains the fallback.
-    if platform == 'linktree':
-        try:
-            page = fetch_page(url, backend='auto')
+    # Use Scout's shared gateway and Scrapling for every supported
+    # link-in-bio provider. Keep requests below as the recovery path.
+    try:
+        page = fetch_page(url, backend='auto')
+
+        if platform == 'linktree':
             profile = _parse_linktree_selector(page.selector, username)
-            if profile:
-                return profile
-            logger.debug(
-                "Scrapling Linktree extraction returned no profile for %s; "
-                "using requests fallback.",
-                username,
+        elif platform == 'stan':
+            profile = _parse_stan_selector(page.selector, username)
+        else:
+            profile = _parse_generic_selector(
+                page.selector, username, platform
             )
-        except Exception as exc:
-            logger.debug(
-                "Scrapling Linktree path failed for %s: %s; "
-                "using requests fallback.",
-                username,
-                exc,
-            )
+
+        if profile:
+            return profile
+
+        logger.debug(
+            "Scrapling extraction returned no profile for %s (%s); "
+            "using requests fallback.",
+            username,
+            platform,
+        )
+    except Exception as exc:
+        logger.debug(
+            "Scrapling path failed for %s (%s): %s; "
+            "using requests fallback.",
+            username,
+            platform,
+            exc,
+        )
 
     headers = {
         'User-Agent': random_user_agent(),
@@ -219,6 +230,45 @@ def _parse_linktree(html: str, username: str) -> Optional[Dict]:
         return _parse_generic(html, username, 'linktree')
 
 
+
+def _parse_stan_selector(selector, username: str) -> Optional[Dict]:
+    """Extract a Stan.store profile from a Scrapling Selector."""
+    links = []
+
+    for node in selector.css("[href]"):
+        url = node.attrib.get("href", "")
+        if url.startswith("http") and "stan.store" not in url:
+            links.append({"title": "", "url": url})
+
+    # Stan embeds name and description in page JSON on common responses.
+    script_text = "\n".join(
+        node.css("::text").get() or ""
+        for node in selector.css("script")
+    )
+    name_match = re.search(r'"name"\s*:\s*"([^"]+)"', script_text)
+    bio_match = re.search(r'"description"\s*:\s*"([^"]*)"', script_text)
+
+    full_name = name_match.group(1) if name_match else ""
+    bio = bio_match.group(1) if bio_match else ""
+
+    if not full_name and not links:
+        return None
+
+    return {
+        "username": username,
+        "full_name": full_name,
+        "bio": bio,
+        "email": _extract_email_from_links(links) or _extract_email(bio),
+        "follower_count": 0,
+        "website": _extract_website(links),
+        "links": links[:20],
+        "link_count": len(links),
+        "socials": _extract_socials(links),
+        "platform": "stan",
+        "profile_url": f"https://stan.store/{username}",
+    }
+
+
 def _parse_stan(html: str, username: str) -> Optional[Dict]:
     """Parse Stan.store page."""
 
@@ -249,6 +299,57 @@ def _parse_stan(html: str, username: str) -> Optional[Dict]:
         'socials': _extract_socials(links),
         'platform': 'stan',
         'profile_url': f'https://stan.store/{username}',
+    }
+
+
+
+def _parse_generic_selector(
+    selector, username: str, platform: str
+) -> Optional[Dict]:
+    """Extract a Linkr or Bio.link profile from a Scrapling Selector."""
+    links = []
+    seen = set()
+    skip_fragments = ("favicon", "static", "assets", ".css", ".js")
+
+    for node in selector.css("[href]"):
+        url = node.attrib.get("href", "")
+
+        if (
+            not url.startswith("http")
+            or url in seen
+            or any(skip in url for skip in skip_fragments)
+        ):
+            continue
+
+        links.append({"title": "", "url": url})
+        seen.add(url)
+
+    title_node = selector.css("title::text").get()
+    full_name = (title_node or "").strip()
+
+    bio = ""
+    for node in selector.css('meta[name="description"]'):
+        bio = node.attrib.get("content", "")
+        if bio:
+            break
+
+    if not links:
+        return None
+
+    base_url = PLATFORMS.get(platform, "").format(username=username)
+
+    return {
+        "username": username,
+        "full_name": full_name,
+        "bio": bio,
+        "email": _extract_email_from_links(links) or _extract_email(bio),
+        "follower_count": 0,
+        "website": _extract_website(links),
+        "links": links[:20],
+        "link_count": len(links),
+        "socials": _extract_socials(links),
+        "platform": platform,
+        "profile_url": base_url,
     }
 
 
