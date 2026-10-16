@@ -519,6 +519,15 @@ def _standard_scrape_loop(scraper_func, items, label_prefix="@", delay_range=Non
     return profiles
 
 
+def _csv_fieldnames(profiles):
+    """Return a stable union of columns across all profile records."""
+    return list(dict.fromkeys(
+        key
+        for profile in profiles
+        for key in profile.keys()
+    ))
+
+
 def _standard_export(profiles, total, platform_name, item_type="profiles"):
     """Shared post-scrape: summary, enrichment, CSV export."""
     if profiles:
@@ -529,7 +538,7 @@ def _standard_export(profiles, total, platform_name, item_type="profiles"):
             filename = f"{platform_name}_export_{timestamp}.csv"
             with open(filename, 'w', newline='', encoding='utf-8') as f:
                 if profiles:
-                    writer = csv.DictWriter(f, fieldnames=profiles[0].keys())
+                    writer = csv.DictWriter(f, fieldnames=_csv_fieldnames(profiles))
                     writer.writeheader()
                     writer.writerows(profiles)
             _export_result(filename, len(profiles), item_type)
@@ -860,7 +869,7 @@ def scrape_from_file():
 
             with open(export_filename, 'w', newline='', encoding='utf-8') as f:
                 if profiles:
-                    writer = csv.DictWriter(f, fieldnames=profiles[0].keys())
+                    writer = csv.DictWriter(f, fieldnames=_csv_fieldnames(profiles))
                     writer.writeheader()
                     writer.writerows(profiles)
 
